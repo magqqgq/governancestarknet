@@ -25,6 +25,44 @@ dotenv.config();
 
 const publicKey = process.env.DYNAMIC_PUBLIC_KEY || '';
 
+// `algorithms` is pinned explicitly. Without it `jsonwebtoken` will accept whichever
+// algorithm the token's own header claims, which is the classic JWT confusion vector
+// (an attacker re-signs a payload with `alg: none`, or downgrades an RS256 token to HS256
+// and signs it with the public key as the HMAC secret). Dynamic issues ES256 tokens.
+// The session cookie must be `SameSite=None` because the SPA and the API are served from
+// different registrable domains; browsers would otherwise omit the cookie entirely.
+//
+// `SameSite=None` also means browsers DO attach this cookie to cross-site requests, so it
+// must never be relied on as the CSRF defence. The actual protection is the strict
+// `ALLOWED_ORIGINS` check on every mutating method in `src/index.ts` — keep the two in sync.
+//
+// `COOKIE_SAMESITE=lax` is the safe choice for any single-origin deployment.
+// `algorithms` is pinned explicitly. Without it `jsonwebtoken` accepts whichever algorithm
+// the token's own header claims, which is the classic JWT confusion vector: an attacker can
+// re-sign a payload with `alg: none`, or downgrade an ES256 token to HS256 and sign it using
+// the public key as the HMAC secret. Dynamic issues ES256 tokens, so only ES256 is accepted.
+export const DYNAMIC_JWT_ALGORITHMS: jwt.Algorithm[] = ['ES256'];
+
+// The session cookie must be `SameSite=None` because the SPA and the API are served from
+// different registrable domains; browsers would otherwise omit the cookie entirely.
+//
+// `SameSite=None` also means browsers DO attach this cookie to cross-site requests, so it
+// must never be relied on as the CSRF defence. The actual protection is the strict
+// `ALLOWED_ORIGINS` check on every mutating method in `src/index.ts` — keep the two in sync.
+//
+// Set `COOKIE_SAMESITE=lax` for any single-origin deployment, which is strictly safer.
+const cookieSameSite = (process.env.COOKIE_SAMESITE === 'lax' ? 'lax' : 'none') as
+  | 'lax'
+  | 'strict'
+  | 'none';
+
+const SESSION_COOKIE_OPTIONS = {
+  httpOnly: true,
+  secure: true,
+  sameSite: cookieSameSite,
+  path: '/',
+} as const;
+
 export const authRouter = router({
   authUser: publicProcedure
     .input(
@@ -39,7 +77,7 @@ export const authRouter = router({
       try {
         const decodedToken = await new Promise<DecodedToken>(
           (resolve, reject) => {
-            jwt.verify(token, publicKey, (err, decoded) => {
+            jwt.verify(token, publicKey, { algorithms: DYNAMIC_JWT_ALGORITHMS }, (err, decoded) => {
               if (err) {
                 reject(err);
               } else {
@@ -107,7 +145,7 @@ export const authRouter = router({
               );
           }
         }
-        opts.ctx.res.cookie('JWT', opts.input.authToken, { httpOnly: true, sameSite: 'none', secure: true });
+        opts.ctx.res.cookie('JWT', opts.input.authToken, SESSION_COOKIE_OPTIONS);
         return;
       } catch (err) {
         console.error(err);
@@ -119,7 +157,7 @@ export const authRouter = router({
     }),
 
   logout: publicProcedure.mutation(async (opts) => {
-    opts.ctx.res.clearCookie('JWT');
+    opts.ctx.res.clearCookie('JWT', { path: '/', secure: true, sameSite: cookieSameSite });
     opts.ctx.req.user = null;
     return;
   }),

@@ -71,19 +71,60 @@ app.use(
   }),
 );
 
-const allowedOrigins = process.env.ALLOWED_ORIGINS ? process.env.ALLOWED_ORIGINS!.split(',') : [];
+// Allowed browser origins for credentialed requests, e.g.
+//   ALLOWED_ORIGINS=https://app.example.com,https://admin.example.com
+//
+// The list is normalised (trailing slashes stripped, lower-cased) so that a mismatch
+// caused by a stray slash cannot silently widen or narrow access.
+const allowedOrigins: string[] = (process.env.ALLOWED_ORIGINS ?? '')
+  .split(',')
+  .map((origin: string) => origin.trim().replace(/\/+$/, '').toLowerCase())
+  .filter((origin: string) => origin.length > 0);
 
-const checkOriginMiddleware = (req: any, res: any, next: any) => {
-  if (!allowedOrigins.length) {
-    next()
-  } else {
-    const origin = req.headers.origin || req.headers['x-forwarded-for'];
-    if (allowedOrigins.includes(origin)) {
-      next();
-    } else {
-      return res.status(403).send('Access Denied');
-    }
+/**
+ * Resolves the request's origin against the allowlist.
+ *
+ * Only the `Origin` header is consulted. The previous implementation fell back to
+ * `x-forwarded-for`, which is a list of *client IP addresses* and is entirely
+ * client-controllable — any attacker could send `X-Forwarded-For: https://app.example.com`
+ * and pass the check.
+ *
+ * @returns true when the origin is allowed, or when the request is same-origin/non-browser.
+ */
+const isOriginAllowed = (req: any): boolean => {
+  const rawOrigin = req.headers.origin;
+  if (!rawOrigin) return false;
+
+  const origin: string = String(rawOrigin).replace(/\/+$/, '').toLowerCase();
+  if (allowedOrigins.length === 0) {
+    // Fail closed. With no allowlist configured, no cross-origin browser request may carry
+    // credentials; same-origin and server-to-server calls (which send no `Origin`) are
+    // unaffected, so a correctly deployed single-origin app keeps working.
+    return false;
   }
+  return allowedOrigins.includes(origin);
+};
+
+/**
+ * Rejects state-changing requests whose `Origin` is not explicitly allowlisted.
+ *
+ * The API authenticates with a `SameSite=None` cookie, which browsers do attach to
+ * cross-site requests. That combination means CORS alone cannot stop CSRF: a simple
+ * cross-site form POST is sent even when the response is blocked. Verifying `Origin` on
+ * every mutating method is what actually stops the request from executing.
+ */
+const checkOriginMiddleware = (req: any, res: any, next: any) => {
+  const SAFE_METHODS = ['GET', 'HEAD', 'OPTIONS'];
+  if (SAFE_METHODS.includes(req.method)) {
+    next();
+    return;
+  }
+
+  if (!isOriginAllowed(req)) {
+    res.status(403).send('Access Denied');
+    return;
+  }
+  next();
 };
 
 app.use(checkOriginMiddleware);
@@ -94,7 +135,18 @@ app.use(helmet());
 
 app.use(
   cors({
-    origin: true,
+    // Reflecting the caller's Origin back while allowing credentials means every website
+    // on the internet can call this API as the logged-in user. The origin must be chosen
+    // from the allowlist instead.
+    origin: (origin: string | undefined, callback: (err: Error | null, allow?: boolean) => void) => {
+      if (!origin) {
+        // Same-origin or non-browser caller (server-to-server, curl). No CORS headers.
+        callback(null, false);
+        return;
+      }
+      const normalized: string = origin.replace(/\/+$/, '').toLowerCase();
+      callback(null, allowedOrigins.includes(normalized));
+    },
     credentials: true,
   }),
 );
