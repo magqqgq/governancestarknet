@@ -25,32 +25,15 @@ dotenv.config();
 
 const publicKey = process.env.DYNAMIC_PUBLIC_KEY || '';
 
-// `algorithms` is pinned explicitly. Without it `jsonwebtoken` will accept whichever
-// algorithm the token's own header claims, which is the classic JWT confusion vector
-// (an attacker re-signs a payload with `alg: none`, or downgrades an RS256 token to HS256
-// and signs it with the public key as the HMAC secret). Dynamic issues ES256 tokens.
-// The session cookie must be `SameSite=None` because the SPA and the API are served from
-// different registrable domains; browsers would otherwise omit the cookie entirely.
-//
-// `SameSite=None` also means browsers DO attach this cookie to cross-site requests, so it
-// must never be relied on as the CSRF defence. The actual protection is the strict
-// `ALLOWED_ORIGINS` check on every mutating method in `src/index.ts` — keep the two in sync.
-//
-// `COOKIE_SAMESITE=lax` is the safe choice for any single-origin deployment.
-// `algorithms` is pinned explicitly. Without it `jsonwebtoken` accepts whichever algorithm
-// the token's own header claims, which is the classic JWT confusion vector: an attacker can
-// re-sign a payload with `alg: none`, or downgrade an ES256 token to HS256 and sign it using
-// the public key as the HMAC secret. Dynamic issues ES256 tokens, so only ES256 is accepted.
+// SECURITY (F-23): Algorithms list is pinned explicitly to ES256 (issued by Dynamic).
+// Without this restriction, jsonwebtoken accepts arbitrary algorithms specified in the token header,
+// opening the classic JWT algorithm-confusion surface (e.g. `alg: none` or HMAC downgrade).
 export const DYNAMIC_JWT_ALGORITHMS: jwt.Algorithm[] = ['ES256'];
 
-// The session cookie must be `SameSite=None` because the SPA and the API are served from
-// different registrable domains; browsers would otherwise omit the cookie entirely.
-//
-// `SameSite=None` also means browsers DO attach this cookie to cross-site requests, so it
-// must never be relied on as the CSRF defence. The actual protection is the strict
-// `ALLOWED_ORIGINS` check on every mutating method in `src/index.ts` — keep the two in sync.
-//
-// Set `COOKIE_SAMESITE=lax` for any single-origin deployment, which is strictly safer.
+// SECURITY (F-02): The session cookie requires SameSite=None when SPA and API reside on
+// different domains. Because browsers send SameSite=None cookies with cross-site requests,
+// CSRF protection is enforced via strict Origin validation in `src/index.ts`.
+// Set COOKIE_SAMESITE=lax for single-origin deployments for stronger isolation.
 const cookieSameSite = (process.env.COOKIE_SAMESITE === 'lax' ? 'lax' : 'none') as
   | 'lax'
   | 'strict'
@@ -86,7 +69,7 @@ export const authRouter = router({
             });
           },
         );
-        if (decodedToken.verified_credentials?.[0].address) {
+        if (decodedToken.verified_credentials?.[0]?.address) {
           const lowerCaseAddress =
             decodedToken.verified_credentials[0].address.toLowerCase();
 
@@ -94,21 +77,20 @@ export const authRouter = router({
             where: eq(users.address, lowerCaseAddress),
           });
 
-          let ethAddress = null;
-          let starknetAddress = null;
+          let ethAddress: string | null = null;
+          let starknetAddress: string | null = null;
 
-          // Iterate over verified credentials to find eth and starknet addresses
-          decodedToken.verified_credentials?.forEach(credential => {
-            if (credential.chain === 'eip155') { // Ethereum address
+          decodedToken.verified_credentials?.forEach((credential) => {
+            if (credential.chain === 'eip155') {
               ethAddress = credential.address.toLowerCase();
-            } else if (credential.chain === 'starknet') { // StarkNet address
+            } else if (credential.chain === 'starknet') {
               starknetAddress = credential.address.toLowerCase();
             }
           });
 
           if (!user) {
             await db.insert(users).values({
-              address: lowerCaseAddress, // save address as lowercase
+              address: lowerCaseAddress,
               walletName: decodedToken.verified_credentials?.[0].wallet_name,
               walletProvider:
                 decodedToken.verified_credentials?.[0].wallet_provider,
@@ -140,7 +122,7 @@ export const authRouter = router({
               .where(
                 eq(
                   users.address,
-                  lowerCaseAddress, // save address as lowercase,
+                  lowerCaseAddress,
                 ),
               );
           }
